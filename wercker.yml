@@ -1,0 +1,117 @@
+box: quay.io/hiphipjorge/kube-nginx-letsencrypt:latest
+
+build:
+  steps:
+    - script:
+      name: npm install
+      code: |
+        npm install -g gulp
+        npm install
+    - script:
+        name: echo nodejs information
+        code: |
+          echo "node version $(node -v) running"
+          echo "npm version $(npm -v) running"
+#    - script:      
+#        name: Create TLS key and cert
+#        code: openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj "/CN=nginxsvc/O=nginxsvc"          
+    - internal/docker-push:
+            entrypoint: node app.js
+            #cmd: 0.0.0.0 8080
+            working-dir: $WERCKER_ROOT
+            tag: $WERCKER_GIT_COMMIT
+            ports: '3000'
+            username: $DOCKER_USERNAME
+            password: $DOCKER_PASSWORD
+            repository: $DOCKER_REPO
+            #registry: https://iad.ocir.io/v2
+            
+deploy-to-kubernetes:
+    box: 
+      id: quay.io/hiphipjorge/kube-nginx-letsencrypt:latest
+      cmd: /bin/sh    
+    steps:
+      - bash-template
+      - script:
+          name: Prepare Kubernetes files
+          code: |
+            mkdir $WERCKER_OUTPUT_DIR/kubernetes
+            mv kubernetes_*.yml $WERCKER_OUTPUT_DIR/kubernetes
+      - kubectl:
+          name: delete namespace
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: delete namespace $WERCKER_APPLICATION_OWNER_NAME --ignore-not-found=true
+      - script:
+          name: wait to delete namespace
+          code: sleep 50        
+      - kubectl:
+          name: create namespace    
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: create namespace $WERCKER_APPLICATION_OWNER_NAME
+      - kubectl:
+          name: create OCR secret
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: create secret docker-registry $OKE_IMAGESECRET --docker-server=iad.ocir.io --docker-username='$DOCKER_USERNAME' --docker-password='$DOCKER_PASSWORD' --docker-email='$DOCKER_EMAIL' --namespace=$WERCKER_APPLICATION_OWNER_NAME
+      - kubectl:
+          name: delete cluster role binding
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: delete clusterrolebinding ${OKE_IMAGESECRET}_clst_adm --ignore-not-found=true --namespace=$WERCKER_APPLICATION_OWNER_NAME
+      - script:
+          name: wait to delete cluster role binding
+          code: sleep 20        
+      - kubectl:
+          name: create TLS cluster role binding
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: create clusterrolebinding ${OKE_IMAGESECRET}_clst_adm --clusterrole=cluster-admin --user=$USER_OCID --namespace=$WERCKER_APPLICATION_OWNER_NAME
+      - script:
+          name: wait to create cluster role binding
+          code: sleep 20        
+      - script:
+          name: "Visualise Nginx config"
+          code: cat nginx.yml
+      - kubectl:
+          name: create Nginx configuration
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: apply -f $WERCKER_ROOT/nginx.yml --namespace=$WERCKER_APPLICATION_OWNER_NAME
+      - script:
+          name: "Visualise TLS cert"
+          code: cat $WERCKER_ROOT/tls.key
+      - kubectl:
+          name: create TLS secret
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: create secret tls tls-secret --key $WERCKER_ROOT/tls.key --cert $WERCKER_ROOT/tls.crt --namespace=$WERCKER_APPLICATION_OWNER_NAME
+      - kubectl:
+          name: create deployment
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: apply -f $WERCKER_OUTPUT_DIR/kubernetes/ --namespace=$WERCKER_APPLICATION_OWNER_NAME
+      - script:
+          name: "Visualise Ingress config"
+          code: cat ingress.yml
+      - kubectl:
+          name: create Ingress configuration
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: apply -f $WERCKER_ROOT/ingress.yml --namespace=$WERCKER_APPLICATION_OWNER_NAME 
+      - kubectl:
+          name: get LoadBalancer public IP address
+          server: $OKE_MASTER
+          token: $OKE_TOKEN
+          insecure-skip-tls-verify: true
+          command: get svc -o jsonpath='{.items[*].status.loadBalancer.ingress[*].ip}' --all-namespaces        
